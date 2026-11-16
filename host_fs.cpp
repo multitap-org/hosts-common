@@ -41,6 +41,21 @@ static bool is_separator(char c)
 #endif
 }
 
+void host_fs_forward_slashes(char* path)
+{
+#if defined(_WIN32)
+    for (char* cursor = path; *cursor != '\0'; cursor++)
+    {
+        if (*cursor == '\\')
+        {
+            *cursor = '/';
+        }
+    }
+#else
+    (void)path;
+#endif
+}
+
 bool host_fs_exists(const char* path)
 {
     std::error_code error;

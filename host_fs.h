@@ -6,6 +6,12 @@
 #include <cstddef>
 #include <cstdint>
 
+// Our paths use '/' on every platform (Windows takes it too). Paths that come
+// from Windows itself (the program's folder, the home folder, a dropped file)
+// use '\\'; this turns them into '/' so a path never mixes both. Does nothing
+// on other platforms, where '\\' is a valid file name character.
+void host_fs_forward_slashes(char* path);
+
 // True if `path` exists (file or directory).
 bool host_fs_exists(const char* path);
 
