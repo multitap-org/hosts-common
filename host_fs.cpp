@@ -62,6 +62,12 @@ bool host_fs_exists(const char* path)
     return std::filesystem::exists(utf8_path(path), error);
 }
 
+bool host_fs_is_directory(const char* path)
+{
+    std::error_code error;
+    return std::filesystem::is_directory(utf8_path(path), error);
+}
+
 bool host_fs_make_directories(const char* path)
 {
     if (path[0] == '\0')
@@ -130,7 +136,7 @@ bool host_fs_read_file(const char* path, uint8_t** data, size_t* size)
     return true;
 }
 
-bool host_fs_write_file(const char* path, const void* data, size_t size)
+static bool write_file(const char* path, const void* data, size_t size, bool owner_only)
 {
     std::filesystem::path file_path = utf8_path(path);
     std::error_code error;
@@ -155,6 +161,22 @@ bool host_fs_write_file(const char* path, const void* data, size_t size)
         host_log(LogLevel::error, "Could not create %s.tmp", path);
         return false;
     }
+    if (owner_only)
+    {
+        // Before anything is written, so the data is never readable by others.
+        // On Windows this only touches the read-only flag (a user's profile
+        // folder is private there already).
+        std::filesystem::permissions(temporary, std::filesystem::perms::owner_read | std::filesystem::perms::owner_write,
+                                     std::filesystem::perm_options::replace, error);
+        if (error)
+        {
+            host_log(LogLevel::error, "Could not make %s.tmp private: %s", path, error.message().c_str());
+            std::fclose(file);
+            std::error_code ignored;
+            std::filesystem::remove(temporary, ignored);
+            return false;
+        }
+    }
     bool ok = size == 0 || std::fwrite(data, 1, size, file) == size;
     ok = std::fflush(file) == 0 && ok;
     ok = std::fclose(file) == 0 && ok;
@@ -175,6 +197,16 @@ bool host_fs_write_file(const char* path, const void* data, size_t size)
         return false;
     }
     return true;
+}
+
+bool host_fs_write_file(const char* path, const void* data, size_t size)
+{
+    return write_file(path, data, size, false);
+}
+
+bool host_fs_write_private_file(const char* path, const void* data, size_t size)
+{
+    return write_file(path, data, size, true);
 }
 
 bool host_fs_copy(const char* from, const char* to)
@@ -222,5 +254,98 @@ bool host_fs_stem(const char* path, char* out, size_t out_size)
     }
     std::memcpy(out, name, length);
     out[length] = '\0';
+    return true;
+}
+
+bool host_fs_canonical(const char* path, char* out, size_t out_size)
+{
+    if (path[0] == '\0')
+    {
+        return false;
+    }
+    std::error_code error;
+    std::filesystem::path canonical = std::filesystem::canonical(utf8_path(path), error);
+    if (error)
+    {
+        host_log(LogLevel::debug, "No such path %s: %s", path, error.message().c_str());
+        return false;
+    }
+    // generic_u8string: '/' separators and UTF-8 on every platform.
+    std::u8string text = canonical.generic_u8string();
+    if (text.size() + 1 > out_size)
+    {
+        host_log(LogLevel::error, "Path too long: %s", path);
+        return false;
+    }
+    std::memcpy(out, text.data(), text.size());
+    out[text.size()] = '\0';
+    return true;
+}
+
+bool host_fs_is_inside(const char* folder, const char* path)
+{
+    // Heap buffers: two 4 KiB paths are too much for some threads' stacks.
+    constexpr size_t PATH_SIZE = 4096;
+    std::string canonical_folder(PATH_SIZE, '\0');
+    std::string canonical_path(PATH_SIZE, '\0');
+    if (!host_fs_canonical(folder, &canonical_folder[0], PATH_SIZE) ||
+        !host_fs_canonical(path, &canonical_path[0], PATH_SIZE))
+    {
+        return false;
+    }
+    size_t folder_length = std::strlen(canonical_folder.c_str());
+    if (std::strncmp(canonical_path.c_str(), canonical_folder.c_str(), folder_length) != 0)
+    {
+        return false;
+    }
+    // "/roms" holds "/roms" and "/roms/x", not "/roms2". A root ("/",
+    // "C:/") already ends in '/'.
+    char next = canonical_path[folder_length];
+    return next == '\0' || next == '/' || canonical_folder[folder_length - 1] == '/';
+}
+
+bool host_fs_list_directory(const char* path, std::vector<HostFsEntry>* entries)
+{
+    entries->clear();
+    std::error_code error;
+    std::filesystem::directory_iterator iterator(utf8_path(path), error);
+    if (error)
+    {
+        host_log(LogLevel::error, "Could not list %s: %s", path, error.message().c_str());
+        return false;
+    }
+    // <filesystem> lists folders only through an iterator (STYLE.md allows
+    // it here). Walked by hand with increment(error): a range-for would use
+    // the throwing increment.
+    std::filesystem::directory_iterator end;
+    while (iterator != end)
+    {
+        std::filesystem::directory_entry item = *iterator;   // a copy: no reference kept
+        std::error_code type_error;
+        bool directory = item.is_directory(type_error);   // follows symlinks
+        bool file = !type_error && item.is_regular_file(type_error);
+        if (!type_error && (directory || file))
+        {
+            HostFsEntry entry;
+            std::u8string name = item.path().filename().u8string();
+            entry.name.assign(static_cast<const char*>(static_cast<const void*>(name.data())), name.size());
+            entry.is_directory = directory;
+            std::error_code link_error;
+            entry.is_symlink = item.is_symlink(link_error);
+            if (file)
+            {
+                std::error_code size_error;
+                uint64_t size = item.file_size(size_error);
+                entry.size = size_error ? 0 : size;
+            }
+            entries->push_back(entry);
+        }
+        iterator.increment(error);
+        if (error)
+        {
+            host_log(LogLevel::error, "Could not list %s: %s", path, error.message().c_str());
+            return false;
+        }
+    }
     return true;
 }
