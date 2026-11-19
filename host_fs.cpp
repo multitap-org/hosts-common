@@ -130,7 +130,7 @@ bool host_fs_read_file(const char* path, uint8_t** data, size_t* size)
     return true;
 }
 
-bool host_fs_write_file(const char* path, const void* data, size_t size)
+static bool write_file(const char* path, const void* data, size_t size, bool owner_only)
 {
     std::filesystem::path file_path = utf8_path(path);
     std::error_code error;
@@ -155,6 +155,22 @@ bool host_fs_write_file(const char* path, const void* data, size_t size)
         host_log(LogLevel::error, "Could not create %s.tmp", path);
         return false;
     }
+    if (owner_only)
+    {
+        // Before anything is written, so the data is never readable by others.
+        // On Windows this only touches the read-only flag (a user's profile
+        // folder is private there already).
+        std::filesystem::permissions(temporary, std::filesystem::perms::owner_read | std::filesystem::perms::owner_write,
+                                     std::filesystem::perm_options::replace, error);
+        if (error)
+        {
+            host_log(LogLevel::error, "Could not make %s.tmp private: %s", path, error.message().c_str());
+            std::fclose(file);
+            std::error_code ignored;
+            std::filesystem::remove(temporary, ignored);
+            return false;
+        }
+    }
     bool ok = size == 0 || std::fwrite(data, 1, size, file) == size;
     ok = std::fflush(file) == 0 && ok;
     ok = std::fclose(file) == 0 && ok;
@@ -175,6 +191,16 @@ bool host_fs_write_file(const char* path, const void* data, size_t size)
         return false;
     }
     return true;
+}
+
+bool host_fs_write_file(const char* path, const void* data, size_t size)
+{
+    return write_file(path, data, size, false);
+}
+
+bool host_fs_write_private_file(const char* path, const void* data, size_t size)
+{
+    return write_file(path, data, size, true);
 }
 
 bool host_fs_copy(const char* from, const char* to)

@@ -28,6 +28,10 @@ bool host_fs_read_file(const char* path, uint8_t** data, size_t* size);
 // parent directories.
 bool host_fs_write_file(const char* path, const void* data, size_t size);
 
+// The same, readable and writable only by the user (0600 on POSIX): for
+// secrets, like a device's private key.
+bool host_fs_write_private_file(const char* path, const void* data, size_t size);
+
 // Copies a file, or a directory with everything inside it, to `to`.
 // Files that already exist at the destination are kept, not overwritten.
 // Creates missing parent directories.
