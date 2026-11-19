@@ -1,6 +1,10 @@
-# host_common: code shared by every core host (host-libretro, later host-jg,
-# host-mame, ...): dynamic library loading, logging, later the IPC transport.
-# Must not depend on SDL or any frontend code.
+# hosts-common: code shared by every core host (host-libretro, later others):
+# dynamic library loading, logging, files, later the IPC transport. Must not
+# depend on SDL or any frontend code. Also the project's CMake helpers
+# (cmake/multitap.cmake), included here for every library and frontend.
+# A library: it doesn't build alone; a frontend adds it (first).
+
+include("${CMAKE_CURRENT_LIST_DIR}/cmake/multitap.cmake")
 
 add_library(host_common STATIC
     host_log.cpp
