@@ -10,7 +10,9 @@
 #
 # Variables (pass with -D, or set in the environment):
 #   ANDROID_NDK_ROOT     the unpacked NDK (default ~/Android/ndk/android-ndk-r30)
-#   MULTITAP_LLVM_ROOT   the LLVM install with clang + lld (default /usr/lib/llvm-21)
+#   MULTITAP_LLVM_ROOT   the LLVM install with clang + lld (default /usr/lib/llvm-21). On an
+#                        x86_64 machine (CI) the NDK's own one works too:
+#                        $ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64
 #   MULTITAP_ANDROID_API minimum Android API level (default 28, Android 9)
 
 if(NOT ANDROID_NDK_ROOT)
@@ -21,7 +23,11 @@ if(NOT ANDROID_NDK_ROOT)
     endif()
 endif()
 if(NOT MULTITAP_LLVM_ROOT)
-    set(MULTITAP_LLVM_ROOT "/usr/lib/llvm-21")
+    if(DEFINED ENV{MULTITAP_LLVM_ROOT})
+        set(MULTITAP_LLVM_ROOT "$ENV{MULTITAP_LLVM_ROOT}")
+    else()
+        set(MULTITAP_LLVM_ROOT "/usr/lib/llvm-21")
+    endif()
 endif()
 if(NOT MULTITAP_ANDROID_API)
     # 28 (Android 9): its libvulkan.so exports the Vulkan 1.1 functions
