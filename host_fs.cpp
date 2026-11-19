@@ -62,6 +62,12 @@ bool host_fs_exists(const char* path)
     return std::filesystem::exists(utf8_path(path), error);
 }
 
+bool host_fs_is_directory(const char* path)
+{
+    std::error_code error;
+    return std::filesystem::is_directory(utf8_path(path), error);
+}
+
 bool host_fs_make_directories(const char* path)
 {
     if (path[0] == '\0')
@@ -248,5 +254,98 @@ bool host_fs_stem(const char* path, char* out, size_t out_size)
     }
     std::memcpy(out, name, length);
     out[length] = '\0';
+    return true;
+}
+
+bool host_fs_canonical(const char* path, char* out, size_t out_size)
+{
+    if (path[0] == '\0')
+    {
+        return false;
+    }
+    std::error_code error;
+    std::filesystem::path canonical = std::filesystem::canonical(utf8_path(path), error);
+    if (error)
+    {
+        host_log(LogLevel::debug, "No such path %s: %s", path, error.message().c_str());
+        return false;
+    }
+    // generic_u8string: '/' separators and UTF-8 on every platform.
+    std::u8string text = canonical.generic_u8string();
+    if (text.size() + 1 > out_size)
+    {
+        host_log(LogLevel::error, "Path too long: %s", path);
+        return false;
+    }
+    std::memcpy(out, text.data(), text.size());
+    out[text.size()] = '\0';
+    return true;
+}
+
+bool host_fs_is_inside(const char* folder, const char* path)
+{
+    // Heap buffers: two 4 KiB paths are too much for some threads' stacks.
+    constexpr size_t PATH_SIZE = 4096;
+    std::string canonical_folder(PATH_SIZE, '\0');
+    std::string canonical_path(PATH_SIZE, '\0');
+    if (!host_fs_canonical(folder, &canonical_folder[0], PATH_SIZE) ||
+        !host_fs_canonical(path, &canonical_path[0], PATH_SIZE))
+    {
+        return false;
+    }
+    size_t folder_length = std::strlen(canonical_folder.c_str());
+    if (std::strncmp(canonical_path.c_str(), canonical_folder.c_str(), folder_length) != 0)
+    {
+        return false;
+    }
+    // "/roms" holds "/roms" and "/roms/x", not "/roms2". A root ("/",
+    // "C:/") already ends in '/'.
+    char next = canonical_path[folder_length];
+    return next == '\0' || next == '/' || canonical_folder[folder_length - 1] == '/';
+}
+
+bool host_fs_list_directory(const char* path, std::vector<HostFsEntry>* entries)
+{
+    entries->clear();
+    std::error_code error;
+    std::filesystem::directory_iterator iterator(utf8_path(path), error);
+    if (error)
+    {
+        host_log(LogLevel::error, "Could not list %s: %s", path, error.message().c_str());
+        return false;
+    }
+    // <filesystem> lists folders only through an iterator (STYLE.md allows
+    // it here). Walked by hand with increment(error): a range-for would use
+    // the throwing increment.
+    std::filesystem::directory_iterator end;
+    while (iterator != end)
+    {
+        std::filesystem::directory_entry item = *iterator;   // a copy: no reference kept
+        std::error_code type_error;
+        bool directory = item.is_directory(type_error);   // follows symlinks
+        bool file = !type_error && item.is_regular_file(type_error);
+        if (!type_error && (directory || file))
+        {
+            HostFsEntry entry;
+            std::u8string name = item.path().filename().u8string();
+            entry.name.assign(static_cast<const char*>(static_cast<const void*>(name.data())), name.size());
+            entry.is_directory = directory;
+            std::error_code link_error;
+            entry.is_symlink = item.is_symlink(link_error);
+            if (file)
+            {
+                std::error_code size_error;
+                uint64_t size = item.file_size(size_error);
+                entry.size = size_error ? 0 : size;
+            }
+            entries->push_back(entry);
+        }
+        iterator.increment(error);
+        if (error)
+        {
+            host_log(LogLevel::error, "Could not list %s: %s", path, error.message().c_str());
+            return false;
+        }
+    }
     return true;
 }
