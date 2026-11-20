@@ -25,8 +25,11 @@ static std::filesystem::path utf8_path(const char* path)
 // A file time as seconds since 1970 (0 before it).
 static uint64_t seconds_since_1970(std::filesystem::file_time_type time)
 {
-    std::chrono::system_clock::time_point system = std::chrono::file_clock::to_sys(time);
-    int64_t seconds = std::chrono::duration_cast<std::chrono::seconds>(system.time_since_epoch()).count();
+    // Straight to seconds: to_sys keeps file_clock's duration, which isn't
+    // system_clock's everywhere (NDK libc++: 128-bit nanoseconds).
+    int64_t seconds = static_cast<int64_t>(std::chrono::duration_cast<std::chrono::seconds>(
+                                               std::chrono::file_clock::to_sys(time).time_since_epoch())
+                                               .count());
     return seconds > 0 ? static_cast<uint64_t>(seconds) : 0;
 }
 
