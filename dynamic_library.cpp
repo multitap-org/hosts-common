@@ -1,5 +1,7 @@
 #include "dynamic_library.h"
 
+#include <cstring>
+
 #include "host_log.h"
 
 #if defined(_WIN32)
@@ -9,13 +11,141 @@
 #include <dlfcn.h>
 #endif
 
+// ---------------------------------------------------------------------------
+// Linked libraries (every platform)
+// ---------------------------------------------------------------------------
+
+struct LinkedEntry
+{
+    LinkedLibrary library    = {};
+    int32_t       open_count = 0;   // opens not closed yet (dynamic_library_is_loaded)
+};
+
+static LinkedEntry g_linked[DYNAMIC_LIBRARY_LINKED_MAX] = {};
+static int32_t     g_linked_count                       = 0;
+
+void dynamic_library_set_linked(const LinkedLibrary* libraries, int32_t count)
+{
+    g_linked_count = 0;
+    for (int32_t i = 0; i < count; i++)
+    {
+        if (g_linked_count == DYNAMIC_LIBRARY_LINKED_MAX)
+        {
+            host_log(LogLevel::error, "Too many linked libraries: %s ignored", libraries[i].file_name);
+            continue;
+        }
+        g_linked[g_linked_count] = LinkedEntry{};
+        g_linked[g_linked_count].library = libraries[i];
+        g_linked_count++;
+    }
+}
+
+// The file name part of a path (after the last slash or backslash).
+static const char* file_name_of(const char* path)
+{
+    const char* name = path;
+    for (const char* c = path; *c != '\0'; c++)
+    {
+        if (*c == '/' || *c == '\\')
+        {
+            name = c + 1;
+        }
+    }
+    return name;
+}
+
+// The linked library `path` names, or nullptr.
+static LinkedEntry* find_linked(const char* path)
+{
+    const char* name = file_name_of(path);
+    for (int32_t i = 0; i < g_linked_count; i++)
+    {
+        if (std::strcmp(g_linked[i].library.file_name, name) == 0)
+        {
+            return &g_linked[i];
+        }
+    }
+    return nullptr;
+}
+
+static GenericFunction linked_symbol(const LinkedEntry* entry, const char* name)
+{
+    for (int32_t i = 0; i < entry->library.symbol_count; i++)
+    {
+        if (std::strcmp(entry->library.symbols[i].name, name) == 0)
+        {
+            return entry->library.symbols[i].function;
+        }
+    }
+    return nullptr;
+}
+
+// The OS's loader, below (one per platform).
+static bool            os_open(DynamicLibrary* library, const char* path);
+static GenericFunction os_symbol(const DynamicLibrary* library, const char* name);
+static void            os_close(DynamicLibrary* library);
+static bool            os_is_loaded(const char* path);
+
+bool dynamic_library_open(DynamicLibrary* library, const char* path)
+{
+    LinkedEntry* entry = find_linked(path);
+    if (entry != nullptr)
+    {
+        entry->open_count++;
+        library->handle = entry;
+        library->linked = true;
+        return true;
+    }
+    library->linked = false;
+    return os_open(library, path);
+}
+
+GenericFunction dynamic_library_symbol(const DynamicLibrary* library, const char* name)
+{
+    if (library->handle == nullptr)
+    {
+        return nullptr;
+    }
+    if (library->linked)
+    {
+        return linked_symbol(static_cast<const LinkedEntry*>(library->handle), name);
+    }
+    return os_symbol(library, name);
+}
+
+void dynamic_library_close(DynamicLibrary* library)
+{
+    if (library->handle == nullptr)
+    {
+        return;
+    }
+    if (library->linked)
+    {
+        static_cast<LinkedEntry*>(library->handle)->open_count--;
+        library->handle = nullptr;
+        library->linked = false;
+        return;
+    }
+    os_close(library);
+}
+
+bool dynamic_library_is_loaded(const char* path)
+{
+    const LinkedEntry* entry = find_linked(path);
+    if (entry != nullptr)
+    {
+        return entry->open_count > 0;
+    }
+    return os_is_loaded(path);
+}
+
 #if defined(_WIN32)
 
 // ---------------------------------------------------------------------------
 // Windows
 // ---------------------------------------------------------------------------
 
-bool dynamic_library_open(DynamicLibrary* library, const char* path)
+static bool os_open(DynamicLibrary* library, const char* path)
 {
     // Paths are UTF-8 everywhere in our code; Windows wants UTF-16 for non-ASCII paths.
     int wide_length = MultiByteToWideChar(CP_UTF8, 0, path, -1, nullptr, 0);
@@ -41,26 +171,19 @@ bool dynamic_library_open(DynamicLibrary* library, const char* path)
     return true;
 }
 
-GenericFunction dynamic_library_symbol(const DynamicLibrary* library, const char* name)
+static GenericFunction os_symbol(const DynamicLibrary* library, const char* name)
 {
-    if (library->handle == nullptr)
-    {
-        return nullptr;
-    }
     FARPROC address = GetProcAddress(reinterpret_cast<HMODULE>(library->handle), name);
     return reinterpret_cast<GenericFunction>(address);
 }
 
-void dynamic_library_close(DynamicLibrary* library)
+static void os_close(DynamicLibrary* library)
 {
-    if (library->handle != nullptr)
-    {
-        FreeLibrary(reinterpret_cast<HMODULE>(library->handle));
-        library->handle = nullptr;
-    }
+    FreeLibrary(reinterpret_cast<HMODULE>(library->handle));
+    library->handle = nullptr;
 }
 
-bool dynamic_library_is_loaded(const char* path)
+static bool os_is_loaded(const char* path)
 {
     int wide_length = MultiByteToWideChar(CP_UTF8, 0, path, -1, nullptr, 0);
     if (wide_length <= 0)
@@ -81,7 +204,7 @@ bool dynamic_library_is_loaded(const char* path)
 // POSIX (Linux, macOS, Android)
 // ---------------------------------------------------------------------------
 
-bool dynamic_library_open(DynamicLibrary* library, const char* path)
+static bool os_open(DynamicLibrary* library, const char* path)
 {
     // RTLD_LOCAL: the core's symbols don't leak into the global namespace,
     // which matters once two different cores are loaded in one process.
@@ -98,27 +221,20 @@ bool dynamic_library_open(DynamicLibrary* library, const char* path)
     return true;
 }
 
-GenericFunction dynamic_library_symbol(const DynamicLibrary* library, const char* name)
+static GenericFunction os_symbol(const DynamicLibrary* library, const char* name)
 {
-    if (library->handle == nullptr)
-    {
-        return nullptr;
-    }
     // POSIX guarantees dlsym results can be converted to function pointers.
     void* address = dlsym(library->handle, name);
     return reinterpret_cast<GenericFunction>(address);
 }
 
-void dynamic_library_close(DynamicLibrary* library)
+static void os_close(DynamicLibrary* library)
 {
-    if (library->handle != nullptr)
-    {
-        dlclose(library->handle);
-        library->handle = nullptr;
-    }
+    dlclose(library->handle);
+    library->handle = nullptr;
 }
 
-bool dynamic_library_is_loaded(const char* path)
+static bool os_is_loaded(const char* path)
 {
     // RTLD_NOLOAD: only succeeds if it's already loaded (the loader matches
     // the file itself, so other spellings of the path are caught). It still

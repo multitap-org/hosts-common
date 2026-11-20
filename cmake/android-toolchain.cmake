@@ -1,5 +1,5 @@
 # CMake toolchain for building multitap frontends (piccolo, piccoletto) for
-# Android (arm64-v8a) with the distro's clang instead of the NDK's. Each
+# Android (arm64-v8a, or armeabi-v7a: MULTITAP_ANDROID_ABI) with the distro's clang instead of the NDK's. Each
 # frontend's android/build-apk.sh passes it as CMAKE_TOOLCHAIN_FILE.
 #
 # Why: Google only ships the NDK's compiler for x86_64 hosts, and the main
@@ -38,7 +38,14 @@ endif()
 
 # Try-compile projects run this file again in their own folder: hand the
 # variables down.
-list(APPEND CMAKE_TRY_COMPILE_PLATFORM_VARIABLES ANDROID_NDK_ROOT MULTITAP_LLVM_ROOT MULTITAP_ANDROID_API)
+# The ABI: arm64-v8a (default), or armeabi-v7a for 32-bit devices such as the
+# SHIELD Portable (Tegra 4, Android 5.1): that build has no Vulkan
+# (MULTITAP_GPU_VULKAN=OFF) and goes with MULTITAP_ANDROID_API 21.
+if(NOT MULTITAP_ANDROID_ABI)
+    set(MULTITAP_ANDROID_ABI arm64-v8a)
+endif()
+list(APPEND CMAKE_TRY_COMPILE_PLATFORM_VARIABLES ANDROID_NDK_ROOT MULTITAP_LLVM_ROOT MULTITAP_ANDROID_API
+     MULTITAP_ANDROID_ABI)
 
 # The NDK keeps the sysroot inside the (x86_64) prebuilt toolchain folder.
 # Only the files are used, never the binaries next to them.
@@ -54,11 +61,22 @@ endif()
 # would make CMake look for the NDK's own (x86_64) compiler. So: CMake's
 # generic Android support is skipped and we say ourselves what Android means.
 set(CMAKE_SYSTEM_NAME Linux)
-set(CMAKE_SYSTEM_PROCESSOR aarch64)
 set(ANDROID TRUE)
-set(CMAKE_ANDROID_ARCH_ABI arm64-v8a)
-
-set(_target "aarch64-linux-android${MULTITAP_ANDROID_API}")
+if(MULTITAP_ANDROID_ABI STREQUAL "armeabi-v7a")
+    # The NDK's ARMv7 target: Thumb-2, VFPv3-D16, soft-float calls (NEON is
+    # on every device Android 5 runs on, but the compiler doesn't assume it).
+    set(CMAKE_SYSTEM_PROCESSOR armv7-a)
+    set(CMAKE_ANDROID_ARCH_ABI armeabi-v7a)
+    set(_target "armv7a-linux-androideabi${MULTITAP_ANDROID_API}")
+    set(_library_architecture "arm-linux-androideabi")
+elseif(MULTITAP_ANDROID_ABI STREQUAL "arm64-v8a")
+    set(CMAKE_SYSTEM_PROCESSOR aarch64)
+    set(CMAKE_ANDROID_ARCH_ABI arm64-v8a)
+    set(_target "aarch64-linux-android${MULTITAP_ANDROID_API}")
+    set(_library_architecture "aarch64-linux-android")
+else()
+    message(FATAL_ERROR "MULTITAP_ANDROID_ABI must be arm64-v8a or armeabi-v7a, not ${MULTITAP_ANDROID_ABI}")
+endif()
 
 set(CMAKE_C_COMPILER   "${MULTITAP_LLVM_ROOT}/bin/clang")
 set(CMAKE_CXX_COMPILER "${MULTITAP_LLVM_ROOT}/bin/clang++")
@@ -111,5 +129,5 @@ set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)
 set(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE ONLY)
 # Bionic's per-API libraries (libandroid.so, libvulkan.so, ...) live in
 # usr/lib/<triple>/<api>.
-set(CMAKE_LIBRARY_ARCHITECTURE "aarch64-linux-android")
-set(CMAKE_SYSTEM_LIBRARY_PATH "/usr/lib/aarch64-linux-android/${MULTITAP_ANDROID_API}")
+set(CMAKE_LIBRARY_ARCHITECTURE "${_library_architecture}")
+set(CMAKE_SYSTEM_LIBRARY_PATH "/usr/lib/${_library_architecture}/${MULTITAP_ANDROID_API}")
