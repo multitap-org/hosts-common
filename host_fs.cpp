@@ -1,5 +1,6 @@
 #include "host_fs.h"
 
+#include <chrono>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
@@ -19,6 +20,14 @@ static std::filesystem::path utf8_path(const char* path)
 {
     const char8_t* text = static_cast<const char8_t*>(static_cast<const void*>(path));
     return std::filesystem::path(text);
+}
+
+// A file time as seconds since 1970 (0 before it).
+static uint64_t seconds_since_1970(std::filesystem::file_time_type time)
+{
+    std::chrono::system_clock::time_point system = std::chrono::file_clock::to_sys(time);
+    int64_t seconds = std::chrono::duration_cast<std::chrono::seconds>(system.time_since_epoch()).count();
+    return seconds > 0 ? static_cast<uint64_t>(seconds) : 0;
 }
 
 // fopen with a UTF-8 path: Windows needs the UTF-16 one (_wfopen).
@@ -337,6 +346,9 @@ bool host_fs_list_directory(const char* path, std::vector<HostFsEntry>* entries)
                 std::error_code size_error;
                 uint64_t size = item.file_size(size_error);
                 entry.size = size_error ? 0 : size;
+                std::error_code time_error;
+                std::filesystem::file_time_type time = item.last_write_time(time_error);
+                entry.mtime = time_error ? 0 : seconds_since_1970(time);
             }
             entries->push_back(entry);
         }
@@ -348,4 +360,173 @@ bool host_fs_list_directory(const char* path, std::vector<HostFsEntry>* entries)
         }
     }
     return true;
+}
+
+bool host_fs_file_info(const char* path, uint64_t* size, uint64_t* mtime)
+{
+    std::filesystem::path file_path = utf8_path(path);
+    std::error_code error;
+    if (!std::filesystem::is_regular_file(file_path, error) || error)
+    {
+        host_log(LogLevel::debug, "%s is not a file", path);
+        return false;
+    }
+    uint64_t file_size = std::filesystem::file_size(file_path, error);
+    if (error)
+    {
+        host_log(LogLevel::error, "Could not read the size of %s: %s", path, error.message().c_str());
+        return false;
+    }
+    std::filesystem::file_time_type time = std::filesystem::last_write_time(file_path, error);
+    *size = file_size;
+    *mtime = error ? 0 : seconds_since_1970(time);
+    return true;
+}
+
+bool host_fs_set_mtime(const char* path, uint64_t mtime)
+{
+    std::chrono::system_clock::time_point system{std::chrono::seconds(static_cast<int64_t>(mtime))};
+    std::filesystem::file_time_type time = std::chrono::file_clock::from_sys(system);
+    std::error_code error;
+    std::filesystem::last_write_time(utf8_path(path), time, error);
+    if (error)
+    {
+        host_log(LogLevel::warning, "Could not set the date of %s: %s", path, error.message().c_str());
+        return false;
+    }
+    return true;
+}
+
+bool host_fs_is_symlink(const char* path)
+{
+    std::error_code error;
+    bool link = std::filesystem::is_symlink(std::filesystem::symlink_status(utf8_path(path), error));
+    return !error && link;
+}
+
+bool host_fs_rename(const char* from, const char* to)
+{
+    std::error_code error;
+    std::filesystem::rename(utf8_path(from), utf8_path(to), error);
+    if (error)
+    {
+        host_log(LogLevel::error, "Could not move %s to %s: %s", from, to, error.message().c_str());
+        return false;
+    }
+    return true;
+}
+
+bool host_fs_remove_file(const char* path)
+{
+    std::error_code error;
+    std::filesystem::remove(utf8_path(path), error);
+    if (error)
+    {
+        host_log(LogLevel::error, "Could not delete %s: %s", path, error.message().c_str());
+        return false;
+    }
+    return true;
+}
+
+bool host_fs_free_space(const char* path, uint64_t* bytes)
+{
+    std::error_code error;
+    std::filesystem::space_info info = std::filesystem::space(utf8_path(path), error);
+    if (error)
+    {
+        host_log(LogLevel::error, "Could not read the free space at %s: %s", path, error.message().c_str());
+        return false;
+    }
+    *bytes = info.available;
+    return true;
+}
+
+struct HostFsFile
+{
+    FILE*       file = nullptr;
+    std::string path;   // for the log
+};
+
+static HostFsFile* open_with_mode(const char* path, const char* mode, const wchar_t* wide_mode)
+{
+    std::filesystem::path file_path = utf8_path(path);
+#if defined(_WIN32)
+    (void)mode;
+    FILE* file = _wfopen(file_path.c_str(), wide_mode);
+#else
+    (void)wide_mode;
+    FILE* file = std::fopen(file_path.c_str(), mode);
+#endif
+    if (file == nullptr)
+    {
+        host_log(LogLevel::error, "Could not open %s", path);
+        return nullptr;
+    }
+    HostFsFile* handle = new HostFsFile;
+    handle->file = file;
+    handle->path = path;
+    return handle;
+}
+
+HostFsFile* host_fs_open_read(const char* path, uint64_t offset)
+{
+    HostFsFile* file = open_with_mode(path, "rb", L"rb");
+    if (file == nullptr)
+    {
+        return nullptr;
+    }
+#if defined(_WIN32)
+    int failed = _fseeki64(file->file, static_cast<__int64>(offset), SEEK_SET);
+#else
+    int failed = fseeko(file->file, static_cast<off_t>(offset), SEEK_SET);
+#endif
+    if (failed != 0)
+    {
+        host_log(LogLevel::error, "Could not seek in %s", path);
+        std::fclose(file->file);
+        delete file;
+        return nullptr;
+    }
+    return file;
+}
+
+HostFsFile* host_fs_open_append(const char* path)
+{
+    return open_with_mode(path, "ab", L"ab");
+}
+
+bool host_fs_file_read(HostFsFile* file, uint8_t* data, size_t size, size_t* read)
+{
+    *read = std::fread(data, 1, size, file->file);
+    if (*read < size && std::ferror(file->file) != 0)
+    {
+        host_log(LogLevel::error, "Could not read %s", file->path.c_str());
+        return false;
+    }
+    return true;
+}
+
+bool host_fs_file_write(HostFsFile* file, const uint8_t* data, size_t size)
+{
+    if (std::fwrite(data, 1, size, file->file) != size)
+    {
+        host_log(LogLevel::error, "Could not write %s", file->path.c_str());
+        return false;
+    }
+    return true;
+}
+
+bool host_fs_file_close(HostFsFile* file)
+{
+    if (file == nullptr)
+    {
+        return true;
+    }
+    bool ok = std::fclose(file->file) == 0;
+    if (!ok)
+    {
+        host_log(LogLevel::error, "Could not finish writing %s", file->path.c_str());
+    }
+    delete file;
+    return ok;
 }
