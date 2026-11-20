@@ -65,9 +65,30 @@ struct HostFsEntry
     bool        is_directory = false;   // after following a symlink
     bool        is_symlink = false;     // the entry itself is a link
     uint64_t    size = 0;               // files only
+    uint64_t    mtime = 0;              // last change, seconds since 1970 (0 = unknown)
 };
 
 // What's in the folder `path`, in no particular order ("." and ".." left
 // out; entries whose type can't be read are skipped). False (logged) if it
 // can't be read.
 bool host_fs_list_directory(const char* path, std::vector<HostFsEntry>* entries);
+
+// A file's size and last change (seconds since 1970). False (logged at debug
+// level) if it isn't there or isn't a file.
+bool host_fs_file_info(const char* path, uint64_t* size, uint64_t* mtime);
+
+// Sets a file's last change (seconds since 1970): a copied file keeps its date.
+bool host_fs_set_mtime(const char* path, uint64_t mtime);
+
+// True if `path` itself is a symlink (not followed).
+bool host_fs_is_symlink(const char* path);
+
+// Moves a file to `to`, replacing a file already there, in one step on the
+// same disk (a reader sees the old file or the new one, never half of it).
+bool host_fs_rename(const char* from, const char* to);
+
+// Deletes a file. Succeeds if it isn't there.
+bool host_fs_remove_file(const char* path);
+
+// Bytes free for this user on the disk holding `path` (an existing folder).
+bool host_fs_free_space(const char* path, uint64_t* bytes);
