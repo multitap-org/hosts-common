@@ -75,8 +75,9 @@ function(multitap_copy_after_build target directory)
 endfunction()
 
 # Version string of a component whose sources are in `source_dir`: `base` on
-# main (or master), `base-<branch>` on any other branch, `base-<commit>` when
-# detached, and `base` alone without git (a source tarball). CMake configures
+# main (or master) and on a commit that is exactly a tag (CI's release
+# builds), `base-<branch>` on any other branch, `base-<commit>` when detached
+# elsewhere, and `base` alone without git (a source tarball). CMake configures
 # again when the branch changes, so the string follows it.
 function(multitap_version out_var base source_dir)
     set(version "${base}")
@@ -87,8 +88,18 @@ function(multitap_version out_var base source_dir)
                         RESULT_VARIABLE result ERROR_QUIET)
         if(result EQUAL 0 AND branch)
             if(branch STREQUAL "HEAD")
-                execute_process(COMMAND "${GIT_EXECUTABLE}" -C "${source_dir}" rev-parse --short HEAD
-                                OUTPUT_VARIABLE branch OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+                # Detached: CI checks out tags (and PRs) this way. A commit
+                # that is exactly a tag is a release build: no suffix, like
+                # main. Otherwise the short commit.
+                execute_process(COMMAND "${GIT_EXECUTABLE}" -C "${source_dir}" describe --tags --exact-match HEAD
+                                OUTPUT_VARIABLE tag RESULT_VARIABLE tag_result
+                                OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+                if(tag_result EQUAL 0 AND tag)
+                    set(branch "main")
+                else()
+                    execute_process(COMMAND "${GIT_EXECUTABLE}" -C "${source_dir}" rev-parse --short HEAD
+                                    OUTPUT_VARIABLE branch OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+                endif()
             endif()
             if(NOT branch STREQUAL "main" AND NOT branch STREQUAL "master")
                 set(version "${base}-${branch}")
