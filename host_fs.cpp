@@ -440,3 +440,93 @@ bool host_fs_free_space(const char* path, uint64_t* bytes)
     *bytes = info.available;
     return true;
 }
+
+struct HostFsFile
+{
+    FILE*       file = nullptr;
+    std::string path;   // for the log
+};
+
+static HostFsFile* open_with_mode(const char* path, const char* mode, const wchar_t* wide_mode)
+{
+    std::filesystem::path file_path = utf8_path(path);
+#if defined(_WIN32)
+    (void)mode;
+    FILE* file = _wfopen(file_path.c_str(), wide_mode);
+#else
+    (void)wide_mode;
+    FILE* file = std::fopen(file_path.c_str(), mode);
+#endif
+    if (file == nullptr)
+    {
+        host_log(LogLevel::error, "Could not open %s", path);
+        return nullptr;
+    }
+    HostFsFile* handle = new HostFsFile;
+    handle->file = file;
+    handle->path = path;
+    return handle;
+}
+
+HostFsFile* host_fs_open_read(const char* path, uint64_t offset)
+{
+    HostFsFile* file = open_with_mode(path, "rb", L"rb");
+    if (file == nullptr)
+    {
+        return nullptr;
+    }
+#if defined(_WIN32)
+    int failed = _fseeki64(file->file, static_cast<__int64>(offset), SEEK_SET);
+#else
+    int failed = fseeko(file->file, static_cast<off_t>(offset), SEEK_SET);
+#endif
+    if (failed != 0)
+    {
+        host_log(LogLevel::error, "Could not seek in %s", path);
+        std::fclose(file->file);
+        delete file;
+        return nullptr;
+    }
+    return file;
+}
+
+HostFsFile* host_fs_open_append(const char* path)
+{
+    return open_with_mode(path, "ab", L"ab");
+}
+
+bool host_fs_file_read(HostFsFile* file, uint8_t* data, size_t size, size_t* read)
+{
+    *read = std::fread(data, 1, size, file->file);
+    if (*read < size && std::ferror(file->file) != 0)
+    {
+        host_log(LogLevel::error, "Could not read %s", file->path.c_str());
+        return false;
+    }
+    return true;
+}
+
+bool host_fs_file_write(HostFsFile* file, const uint8_t* data, size_t size)
+{
+    if (std::fwrite(data, 1, size, file->file) != size)
+    {
+        host_log(LogLevel::error, "Could not write %s", file->path.c_str());
+        return false;
+    }
+    return true;
+}
+
+bool host_fs_file_close(HostFsFile* file)
+{
+    if (file == nullptr)
+    {
+        return true;
+    }
+    bool ok = std::fclose(file->file) == 0;
+    if (!ok)
+    {
+        host_log(LogLevel::error, "Could not finish writing %s", file->path.c_str());
+    }
+    delete file;
+    return ok;
+}

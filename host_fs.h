@@ -92,3 +92,25 @@ bool host_fs_remove_file(const char* path);
 
 // Bytes free for this user on the disk holding `path` (an existing folder).
 bool host_fs_free_space(const char* path, uint64_t* bytes);
+
+// A file read or written piece by piece (big files: games of gigabytes), for
+// one thread at a time. Opaque: a FILE* opened with a UTF-8 path.
+struct HostFsFile;
+
+// For reading from `offset`. nullptr (logged) if it can't be opened.
+HostFsFile* host_fs_open_read(const char* path, uint64_t offset);
+
+// For writing at the end: created if it isn't there, kept if it is (a resumed
+// copy goes on where it stopped). nullptr (logged) if it can't be opened.
+HostFsFile* host_fs_open_append(const char* path);
+
+// Up to `size` bytes; fewer only at the end of the file. False (logged) on a
+// read error.
+bool host_fs_file_read(HostFsFile* file, uint8_t* data, size_t size, size_t* read);
+
+// All `size` bytes, or false (logged).
+bool host_fs_file_write(HostFsFile* file, const uint8_t* data, size_t size);
+
+// Writes what's buffered to the disk; false (logged) if that failed.
+// Closing a file that was written: call it first, a full disk shows here.
+bool host_fs_file_close(HostFsFile* file);
