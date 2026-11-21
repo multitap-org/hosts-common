@@ -73,6 +73,11 @@ struct HostFsEntry
 // can't be read.
 bool host_fs_list_directory(const char* path, std::vector<HostFsEntry>* entries);
 
+// The same with only the names and types (size and mtime 0): what a file
+// browser needs, and the cheapest listing (no stat per file where the
+// listing already says the type; on a network share that's the difference).
+bool host_fs_list_entries(const char* path, std::vector<HostFsEntry>* entries);
+
 // A file's size and last change (seconds since 1970). False (logged at debug
 // level) if it isn't there or isn't a file.
 bool host_fs_file_info(const char* path, uint64_t* size, uint64_t* mtime);

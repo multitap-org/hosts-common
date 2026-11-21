@@ -9,6 +9,10 @@
 
 #include "host_log.h"
 
+#if defined(_WIN32)
+#include <windows.h>   // FindFirstFileExW: a folder listed with its entries' types, sizes, times
+#endif
+
 // The only file that uses <filesystem> (STYLE.md). Every call takes a
 // std::error_code: those overloads report errors there and never throw
 // (we build with -fno-exceptions).
@@ -316,7 +320,75 @@ bool host_fs_is_inside(const char* folder, const char* path)
     return next == '\0' || next == '/' || canonical_folder[folder_length - 1] == '/';
 }
 
-bool host_fs_list_directory(const char* path, std::vector<HostFsEntry>* entries)
+#if defined(_WIN32)
+// A FILETIME (100 ns steps since 1601) as seconds since 1970 (0 before it).
+static uint64_t filetime_seconds(FILETIME time)
+{
+    constexpr uint64_t TICKS_1601_TO_1970 = 116444736000000000ull;
+    uint64_t ticks = (static_cast<uint64_t>(time.dwHighDateTime) << 32) | time.dwLowDateTime;
+    return ticks > TICKS_1601_TO_1970 ? (ticks - TICKS_1601_TO_1970) / 10000000ull : 0;
+}
+
+// Windows: FindFirstFileExW hands each entry's type, size and time with its
+// name, in batches (LARGE_FETCH). <filesystem>'s directory_entry asks for
+// each of them apart (MinGW's libstdc++ caches none): five round trips a
+// file, which on a network share (an SMB NAS) made a big folder take minutes.
+static bool list_folder(const char* path, std::vector<HostFsEntry>* entries, bool with_info)
+{
+    (void)with_info;   // (the size and time come anyway)
+    entries->clear();
+    std::wstring pattern = utf8_path(path).native();
+    if (!pattern.empty() && pattern.back() != L'\\' && pattern.back() != L'/')
+    {
+        pattern += L'\\';
+    }
+    pattern += L'*';
+    WIN32_FIND_DATAW data;
+    HANDLE find = FindFirstFileExW(pattern.c_str(), FindExInfoBasic, &data, FindExSearchNameMatch, nullptr,
+                                   FIND_FIRST_EX_LARGE_FETCH);
+    if (find == INVALID_HANDLE_VALUE)
+    {
+        DWORD code = GetLastError();
+        if (code == ERROR_FILE_NOT_FOUND)
+        {
+            return true;   // nothing at all in it (an empty drive's root has no "." either)
+        }
+        host_log(LogLevel::error, "Could not list %s: error %u", path, static_cast<unsigned>(code));
+        return false;
+    }
+    do
+    {
+        bool dot = data.cFileName[0] == L'.' &&
+                   (data.cFileName[1] == L'\0' || (data.cFileName[1] == L'.' && data.cFileName[2] == L'\0'));
+        if (dot)
+        {
+            continue;
+        }
+        HostFsEntry entry;
+        std::u8string name = std::filesystem::path(data.cFileName).u8string();
+        entry.name.assign(static_cast<const char*>(static_cast<const void*>(name.data())), name.size());
+        entry.is_directory = (data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+        entry.is_symlink = (data.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0 && data.dwReserved0 == IO_REPARSE_TAG_SYMLINK;
+        if (!entry.is_directory)
+        {
+            entry.size = (static_cast<uint64_t>(data.nFileSizeHigh) << 32) | data.nFileSizeLow;
+            entry.mtime = filetime_seconds(data.ftLastWriteTime);
+        }
+        entries->push_back(entry);
+    } while (FindNextFileW(find, &data));
+    DWORD code = GetLastError();
+    FindClose(find);
+    if (code != ERROR_NO_MORE_FILES)
+    {
+        host_log(LogLevel::error, "Could not list %s: error %u", path, static_cast<unsigned>(code));
+        return false;
+    }
+    return true;
+}
+#else
+// Elsewhere <filesystem>'s directory_entry keeps the type the listing gave
+// (d_type): only the size and time cost a stat each, and only `with_info`.
+static bool list_folder(const char* path, std::vector<HostFsEntry>* entries, bool with_info)
 {
     entries->clear();
     std::error_code error;
@@ -344,7 +416,7 @@ bool host_fs_list_directory(const char* path, std::vector<HostFsEntry>* entries)
             entry.is_directory = directory;
             std::error_code link_error;
             entry.is_symlink = item.is_symlink(link_error);
-            if (file)
+            if (file && with_info)
             {
                 std::error_code size_error;
                 uint64_t size = item.file_size(size_error);
@@ -363,6 +435,17 @@ bool host_fs_list_directory(const char* path, std::vector<HostFsEntry>* entries)
         }
     }
     return true;
+}
+#endif
+
+bool host_fs_list_directory(const char* path, std::vector<HostFsEntry>* entries)
+{
+    return list_folder(path, entries, true);
+}
+
+bool host_fs_list_entries(const char* path, std::vector<HostFsEntry>* entries)
+{
+    return list_folder(path, entries, false);
 }
 
 bool host_fs_file_info(const char* path, uint64_t* size, uint64_t* mtime)
