@@ -79,8 +79,21 @@ endfunction()
 # builds), `base-<branch>` on any other branch, `base-<commit>` when detached
 # elsewhere, and `base` alone without git (a source tarball). CMake configures
 # again when the branch changes, so the string follows it.
+# A file `.multitap-version-suffix` in `source_dir` wins over all that:
+# `base-<its first line>`. CI writes it for the signed builds of main
+# (snapshot.<date>.<commit>, release.yml); a file because flatpak-builder
+# passes no environment into its sandbox.
 function(multitap_version out_var base source_dir)
     set(version "${base}")
+    set(suffix_file "${source_dir}/.multitap-version-suffix")
+    if(EXISTS "${suffix_file}")
+        set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${suffix_file}")
+        file(STRINGS "${suffix_file}" suffix LIMIT_COUNT 1)
+        if(suffix)
+            set(${out_var} "${base}-${suffix}" PARENT_SCOPE)
+            return()
+        endif()
+    endif()
     find_package(Git QUIET)
     if(GIT_FOUND)
         execute_process(COMMAND "${GIT_EXECUTABLE}" -C "${source_dir}" rev-parse --abbrev-ref HEAD
